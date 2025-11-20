@@ -6,6 +6,7 @@ GrezPay WooCommerce Payment Gateway – Custom Integration
 This repository contains a custom-built GrezPay Payment Gateway plugin for WooCommerce.
 It uses the GrezPay v2 API and includes secure encryption handling, order validation, API communication, and return/redirect response management.
 
+
 🔥 Features
 
 ✔️ Supports GrezPay Encrypt API & Collect API
@@ -22,6 +23,8 @@ It uses the GrezPay v2 API and includes secure encryption handling, order valida
 
 ✔️ Demo-standard coding format for developers
 
+
+
 📦 Installation
 
 Download the plugin folder
@@ -36,6 +39,7 @@ WooCommerce → Settings → Payments → GrezPay
 
 Add your API credentials and enable the gateway
 
+
 🛠️ Requirements
 
 WordPress 5.8+
@@ -47,9 +51,12 @@ PHP 7.4+
 GrezPay Merchant Credentials
 
 
+
 📚 Documentation
 
 This plugin implements the GrezPay v2 API following the official encryption and payment workflow guidelines.
+
+
 
 🤝 Contributions
 
