@@ -45,3 +45,16 @@ WooCommerce 6.0+
 PHP 7.4+
 
 GrezPay Merchant Credentials
+
+
+📚 Documentation
+
+This plugin implements the GrezPay v2 API following the official encryption and payment workflow guidelines.
+
+🤝 Contributions
+
+Contributions, improvements, and pull requests are welcome!
+
+📜 License
+
+This project is licensed under the MIT License.
