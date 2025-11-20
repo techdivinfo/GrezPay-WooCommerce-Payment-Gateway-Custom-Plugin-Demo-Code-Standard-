@@ -1,0 +1,361 @@
+<?php
+/*
+Plugin Name: GrezPay WooCommerce Gateway
+Description: Official GrezPay V2 Payment Gateway for WooCommerce (Encrypt + Collect API)
+Author: Salim Khan Devinfo System
+Version: 2.3
+*/
+
+if (!defined('ABSPATH')) exit;
+
+// 1. Register Payment Gateway
+add_filter('woocommerce_payment_gateways', 'grezpay_add_gateway_class');
+function grezpay_add_gateway_class($gateways) {
+    $gateways[] = 'WC_GrezPay_Gateway';
+    return $gateways;
+}
+
+// 2. Gateway Class
+add_action('plugins_loaded', 'grezpay_init_gateway_class');
+
+function grezpay_init_gateway_class() {
+    if (!class_exists('WC_Payment_Gateway')) return;
+
+    class WC_GrezPay_Gateway extends WC_Payment_Gateway {
+        public function __construct() {
+            $this->id                 = 'grezpay_gateway';
+            $this->method_title       = 'GrezPay Payment Gateway';
+            $this->method_description = 'Pay using UPI / QR via GrezPay V2 APIs';
+            $this->supports           = ['products'];
+
+            // Settings
+            $this->init_form_fields();
+            $this->init_settings();
+
+            $this->enabled      = $this->get_option('enabled', 'no');
+            $this->title        = $this->get_option('title', 'UPI / QR (GrezPay)');
+            $this->app_id       = trim($this->get_option('app_id', ''));
+            $this->api_key      = trim($this->get_option('api_key', ''));
+            $this->salt         = trim($this->get_option('salt', ''));
+            $this->merchant_id  = trim($this->get_option('merchant_id', ''));
+            $this->return_url   = home_url('/?grezpay_return=1'); // Customer redirect
+            $this->alert_url    = home_url('/?wc-api=grezpay_webhook'); // Webhook URL
+
+            // Save admin options
+            add_action('woocommerce_update_options_payment_gateways_' . $this->id, [$this, 'process_admin_options']);
+
+            // Webhook listener
+            add_action('woocommerce_api_grezpay_webhook', [$this, 'grezpay_webhook_listener']);
+
+            // Optional: simple return handler to guide customers after redirect
+            add_action('template_redirect', [$this, 'handle_return_redirect']);
+        }
+
+        // 3. Admin Fields
+        public function init_form_fields() {
+            $this->form_fields = [
+                'enabled' => [
+                    'title'   => 'Enable',
+                    'type'    => 'checkbox',
+                    'label'   => 'Enable GrezPay Payments',
+                    'default' => 'yes'
+                ],
+                'title' => [
+                    'title'   => 'Title',
+                    'type'    => 'text',
+                    'default' => 'UPI / QR (GrezPay)'
+                ],
+                'app_id' => [
+                    'title' => 'App ID',
+                    'type'  => 'text',
+                    'description' => 'Your GrezPay App ID',
+                ],
+                'api_key' => [
+                    'title' => 'API Key',
+                    'type'  => 'password',
+                    'description' => 'Your GrezPay API Key',
+                ],
+                'salt' => [
+                    'title' => 'Salt Key',
+                    'type'  => 'password',
+                    'description' => 'Your GrezPay Salt Key (used for HMAC verification)',
+                ],
+                'merchant_id' => [
+                    'title' => 'Merchant ID',
+                    'type'  => 'text',
+                    'description' => 'Your GrezPay Merchant ID',
+                ]
+            ];
+        }
+
+        // Validate settings
+        public function process_admin_options() {
+            $post_data = $this->get_post_data();
+
+            $required = [
+                'woocommerce_grezpay_gateway_app_id'      => 'App ID',
+                'woocommerce_grezpay_gateway_api_key'     => 'API Key',
+                'woocommerce_grezpay_gateway_salt'        => 'Salt Key',
+                'woocommerce_grezpay_gateway_merchant_id' => 'Merchant ID',
+            ];
+
+            foreach ($required as $field => $label) {
+                if (empty($post_data[$field])) {
+                    WC_Admin_Settings::add_error($label . ' is required.');
+                }
+            }
+
+            return parent::process_admin_options();
+        }
+
+        // 4. Process Payment (with detailed logging)
+        public function process_payment($order_id) {
+            $order = wc_get_order($order_id);
+
+            // HTTPS enforcement
+            if (!is_ssl()) {
+                wc_add_notice('GrezPay Error: Your site must use HTTPS for payments.', 'error');
+                return ['result' => 'failure'];
+            }
+
+            // Basic credentials check
+            if (!$this->app_id || !$this->api_key || !$this->salt || !$this->merchant_id) {
+                wc_add_notice('GrezPay Error: Gateway credentials are missing. Please contact support.', 'error');
+                // wc_add_notice(print_r($order));
+                return ['result' => 'failure'];
+            }
+
+            // Sanitize phone number (GrezPay requires 10 digits)
+            $raw_phone = preg_replace('/\D/', '', (string) $order->get_billing_phone());
+            $customerPhone = substr($raw_phone, -10);
+            
+            
+          
+
+            // Generate a unique GrezPay order reference tied to Woo order
+            // $grezpay_order_id = 'GP-' . $order->get_id() . '-' . wp_generate_password(6, false);
+            $grezpay_order_id = strtoupper(substr(bin2hex(random_bytes(8)), 0, 16));
+
+            
+
+            // STEP 1 — Encrypt Data
+            $encrypt_payload = [
+                "orderAmount"   => number_format((float) $order->get_total(), 2, '.', ''),
+                "orderCurrency" => "INR",
+                "orderNote"     => "$order_id",
+                "customerName"  => $order->get_billing_first_name(),
+                "customerEmail" => $order->get_billing_email(),
+                "customerPhone" => $customerPhone,
+                "paymentOption" => "upi_qr",
+                "appId"         => $this->app_id,
+                "orderId"       => $grezpay_order_id,
+                "returnUrl"     => $this->return_url,
+                "alertUrl"      => $this->alert_url,
+                "apiKey"        => $this->api_key,
+                "salt"          => $this->salt,
+                "merchantId"    => $this->merchant_id
+            ];
+
+            $encrypt_res = wp_remote_post(
+                "https://v2.grezpay.com/api/merchant/payment-link/encrypt-data",
+                [
+                    'headers' => ['Content-Type' => 'application/json'],
+                    'body'    => wp_json_encode($encrypt_payload),
+                    'timeout' => 60
+                ]
+            );
+
+
+            // print($encrypt_payload);
+
+            if (is_wp_error($encrypt_res)) {
+                $order->add_order_note("GrezPay Encrypt WP_Error: " . $encrypt_res->get_error_message());
+                wc_add_notice('GrezPay Error: Encrypt API request failed.', 'error');
+                return ['result' => 'failure'];
+            }
+
+            $encrypt_http_code = wp_remote_retrieve_response_code($encrypt_res);
+            $encrypt_body_raw  = wp_remote_retrieve_body($encrypt_res);
+            $order->add_order_note("GrezPay Encrypt Response ({$encrypt_http_code}): " . $encrypt_body_raw);
+
+            $encrypt_body = json_decode($encrypt_body_raw, true);
+            if (!is_array($encrypt_body) || !isset($encrypt_body['data']['encryptedData'])) {
+                wc_add_notice('GrezPay Error: Encrypt API failed. Check order notes.', 'error');
+                return ['result' => 'failure'];
+            }
+
+            $encryptedData = $encrypt_body['data']['encryptedData'];
+
+            // STEP 2 — Collect Payment
+            $collect_payload = [
+                "merchantId"    => $this->merchant_id,
+                "encryptedData" => $encryptedData
+                // Some implementations also require orderId/appId; uncomment if necessary:
+                // "orderId" => $grezpay_order_id,
+                // "appId"   => $this->app_id,
+            ];
+
+            $collect_res = wp_remote_post(
+                "https://v2.grezpay.com/api/collect-payment",
+                [
+                    'headers' => ['Content-Type' => 'application/json'],
+                    'body'    => wp_json_encode($collect_payload),
+                    'timeout' => 60
+                ]
+            );
+
+            if (is_wp_error($collect_res)) {
+                $order->add_order_note("GrezPay Collect WP_Error: " . $collect_res->get_error_message());
+                wc_add_notice('GrezPay Error: Collect API request failed.', 'error');
+                return ['result' => 'failure'];
+            }
+
+            $collect_http_code = wp_remote_retrieve_response_code($collect_res);
+            $collect_raw       = wp_remote_retrieve_body($collect_res);
+            $order->add_order_note("GrezPay Collect Response ({$collect_http_code}): " . $collect_raw);
+
+            $collect_body = json_decode($collect_raw, true);
+
+            // Try multiple possible locations for payment link (defensive)
+            $payment_url = $collect_body['data']['paymentLink']
+                ?? $collect_body['payment_link']
+                ?? $collect_body['data']['payment_link']
+                ?? null;
+
+                // print_r($collect_body);
+
+             if (!$payment_url || !is_string($payment_url)) {
+                 // Provide a customer-facing error while keeping logs in order notes
+                 wc_add_notice('GrezPay Error: Payment link missing. Check order notes for details.', 'error');
+                 return ['result' => 'failure'];
+             }
+
+            // Finalize order: place on-hold while awaiting payment (WooCommerce convention)
+            $order->update_status('on-hold', 'Awaiting GrezPay payment');
+            $order->add_meta_data('grezpay_order_id', $grezpay_order_id, true);
+            $order->add_meta_data('grezpay_expected_amount', number_format((float) $order->get_total(), 2, '.', ''), true);
+            $order->save();
+
+            return [
+                'result'   => 'success',
+                'redirect' => $payment_url
+            ];
+        }
+
+        // 5. Webhook Listener (with signature verification and amount check)
+        public function grezpay_webhook_listener() {
+            $raw = file_get_contents('php://input');
+            $payload = json_decode($raw, true);
+
+            if (!is_array($payload)) {
+                error_log('GrezPay Webhook: Invalid JSON payload.');
+                wp_die('Invalid Request', '', 400);
+            }
+
+            // Retrieve signature from common header names (adjust per GrezPay docs)
+            $signature = '';
+            if (isset($_SERVER['HTTP_X_GREZPAY_SIGNATURE'])) {
+                $signature = trim($_SERVER['HTTP_X_GREZPAY_SIGNATURE']);
+            } elseif (isset($_SERVER['HTTP_X_GREZPAY_SIGN'])) {
+                $signature = trim($_SERVER['HTTP_X_GREZPAY_SIGN']);
+            }
+
+            if (!$this->salt || !$signature) {
+                error_log('GrezPay Webhook: Missing signature or salt.');
+                wp_die('Unauthorized', '', 401);
+            }
+
+            // Verify HMAC signature over raw body using salt
+            $expected = hash_hmac('sha256', $raw, $this->salt);
+            if (!hash_equals($expected, $signature)) {
+                error_log('GrezPay Webhook: Invalid signature.');
+                wp_die('Unauthorized', '', 401);
+            }
+
+            // Extract GrezPay order reference
+            $grez_order = $payload['payment_link']['order_id']
+                ?? $payload['order_id']
+                ?? $payload['data']['order_id']
+                ?? null;
+
+            if (!$grez_order) {
+                error_log('GrezPay Webhook: order_id missing.');
+                wp_die('Invalid Request', '', 400);
+            }
+
+            // Locate the Woo order by stored meta
+            $orders = wc_get_orders([
+                'meta_key'   => 'grezpay_order_id',
+                'meta_value' => $grez_order,
+                'limit'      => 1
+            ]);
+
+            if (!$orders) {
+                error_log('GrezPay Webhook: Order not found for ID ' . $grez_order);
+                wp_die('Order Not Found', '', 404);
+            }
+
+            /** @var WC_Order $order */
+            $order = $orders[0];
+
+            // Amount checks (if present)
+            $paid_amount = null;
+            if (isset($payload['amount'])) {
+                $paid_amount = number_format((float) $payload['amount'], 2, '.', '');
+            } elseif (isset($payload['payment_link']['amount'])) {
+                $paid_amount = number_format((float) $payload['payment_link']['amount'], 2, '.', '');
+            } elseif (isset($payload['data']['amount'])) {
+                $paid_amount = number_format((float) $payload['data']['amount'], 2, '.', '');
+            }
+
+            $expected_amount = $order->get_meta('grezpay_expected_amount');
+            if ($paid_amount && $expected_amount && $paid_amount !== $expected_amount) {
+                $order->update_status('on-hold', 'GrezPay webhook amount mismatch. Paid: ' . $paid_amount . ', Expected: ' . $expected_amount);
+                error_log('GrezPay Webhook: Amount mismatch for order ' . $order->get_id());
+                wp_die('Amount Mismatch', '', 422);
+            }
+
+            // Status fields
+            $status = $payload['status']
+                ?? $payload['payment_link']['status']
+                ?? $payload['data']['status']
+                ?? 'unknown';
+
+            $transaction_id = $payload['transaction_id']
+                ?? $payload['payment_link']['transaction_id']
+                ?? $payload['data']['transaction_id']
+                ?? '';
+
+            $utr = $payload['utr']
+                ?? $payload['payment_link']['utr']
+                ?? $payload['data']['utr']
+                ?? 'N/A';
+
+            if ($status === 'success' || $status === 'paid') {
+                if (!$order->is_paid()) {
+                    $order->payment_complete($transaction_id);
+                    $order->add_order_note('GrezPay payment successful. UTR: ' . $utr);
+                }
+                wp_die('OK', '', 200);
+            }
+
+            if (in_array($status, ['failed', 'error', 'cancelled'], true)) {
+                $order->update_status('failed', 'GrezPay payment failed: ' . $status);
+                wp_die('OK', '', 200);
+            }
+
+            // Pending/unknown: keep on-hold
+            $order->update_status('on-hold', 'GrezPay status: ' . $status);
+            wp_die('OK', '', 200);
+        }
+
+        // 6. Simple return handler (optional UX)
+        public function handle_return_redirect() {
+            if (!isset($_GET['grezpay_return'])) return;
+
+            wc_add_notice('Payment status will be updated shortly. You can review your order in My Account.', 'notice');
+            wp_safe_redirect(wc_get_account_endpoint_url('orders'));
+            exit;
+        }
+    }
+}
